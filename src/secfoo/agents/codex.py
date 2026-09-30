@@ -19,6 +19,7 @@ already in the user's own ~/.codex/config.toml.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from secfoo.agents.base import AgentAdapter
@@ -28,6 +29,23 @@ class CodexAdapter(AgentAdapter):
     name = "codex"
     binary = "codex"
     default_timeout_seconds = 1800
+    # `codex exec -` reads the prompt from stdin; passing it as argv breaks
+    # on Windows, where `codex` is a `.cmd` shim and cmd.exe truncates the
+    # argument at its first newline.
+    prompt_via_stdin = True
+
+    def detect_failure(self, stdout: str, stderr: str) -> str | None:
+        # On Windows without Codex's (admin-installed) sandbox, `--sandbox
+        # read-only` refuses *every* shell command, reads included, and
+        # `codex exec` still exits 0 with a "could not inspect" report
+        # (SECFOO-10 E2E, codex-cli 0.159.2). Never record that as success.
+        if "exec_command failed" not in stderr:
+            return None
+        hint = ""
+        if os.name == "nt":
+            hint = (" On Windows, Codex's read-only sandbox needs a one-time admin setup"
+                    " (set windows.sandbox = \"elevated\" in ~/.codex/config.toml and approve the prompt).")
+        return "Codex's sandbox rejected its commands, so the target was never read." + hint
 
     def build_command(self, prompt: str, *, workdir: Path) -> list[str]:
         return [
@@ -47,8 +65,6 @@ class CodexAdapter(AgentAdapter):
             "never",
             "--cd",
             str(workdir),
-            # `--` so a prompt that happens to start with "-" is never
-            # parsed as a flag.
-            "--",
-            prompt,
+            # `-`: read the prompt from stdin (see prompt_via_stdin).
+            "-",
         ]

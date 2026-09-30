@@ -23,9 +23,19 @@ instruction, not by sandboxing, matching the same trust level the other
 adapters accept (none of claude.py/cursor.py/gemini.py/antigravity.py
 sandbox writes at the OS level either).
 
-`-s`/`--silent` drops the token-usage stats banner so stdout is just the
-agent's answer -- confirmed directly (no JSON envelope to unwrap, unlike
-claude.py/gemini.py), so `extract_report()` is not overridden here.
+`--output-format json` (JSONL events) replaces the earlier `-s` plain-text
+mode. SECFOO-10 E2E (Sep 2026, CLI 1.0.89) showed the quirk below is
+worse than cosmetic: the built-in scanner runs as a *subagent*
+("security-review") and in text mode its output streams to stdout
+concurrently with the main answer, interleaving mid-line (e.g.
+"**Severity:# Secret LOW Scanning Report") and corrupting the report.
+`--stream off` stops the interleaving but renders Markdown to plain text,
+dropping the headings the report parsers need. In JSONL every subagent
+event carries an `agentId`, so `extract_report()` takes the last
+non-empty `assistant.message` without one -- the main agent's final
+answer, clean and in raw Markdown. The history below is kept for context;
+the `strip_preamble()` fallback it describes is still correct but no
+longer needed for Copilot.
 
 CONFIRMED QUIRK (reproduced twice, Sep 2026 -- once on a casual prompt,
 once on a real `secfoo run --skill sast --agent copilot` end-to-end run):
@@ -62,6 +72,7 @@ resulting preamble downstream is the safer fix.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from secfoo.agents.base import AgentAdapter
@@ -71,6 +82,27 @@ class CopilotAdapter(AgentAdapter):
     name = "copilot"
     binary = "copilot"
     default_timeout_seconds = 1800
+    # Piped stdin instead of `-p <prompt>`: on Windows `copilot` is a `.bat`
+    # shim, and cmd.exe cut a `-p` prompt off at its first newline
+    # (reproduced Sep 2026, CLI 1.0.89). With stdin piped and no `-p`, the
+    # CLI still runs one non-interactive turn and exits.
+    prompt_via_stdin = True
 
     def build_command(self, prompt: str, *, workdir: Path) -> list[str]:
-        return [self.binary, "-p", prompt, "-s", "--allow-all-tools"]
+        return [self.binary, "--output-format", "json", "--allow-all-tools"]
+
+    def extract_report(self, stdout: str) -> str:
+        report = None
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "assistant.message" or "agentId" in event:
+                continue
+            content = (event.get("data") or {}).get("content")
+            if content:
+                report = content
+        # Not JSONL at all (e.g. an older CLI ignoring the flag): stdout is
+        # the answer itself, as in the old `-s` mode.
+        return report if report is not None else stdout
