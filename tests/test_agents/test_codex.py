@@ -49,6 +49,21 @@ def test_prompt_is_read_from_stdin_not_argv(fake_popen, tmp_path):
     assert fake.stdin_input == prompt
 
 
+def test_windows_uses_unelevated_sandbox(tmp_path, monkeypatch):
+    """SECFOO-38: on Windows, read-only with no Windows sandbox configured
+    rejects every command; the unelevated sandbox reads but can't write."""
+    monkeypatch.setattr("secfoo.agents.codex._IS_WINDOWS", True)
+    cmd = CodexAdapter().build_command("hello", workdir=tmp_path)
+    assert cmd[cmd.index("-c") + 1] == 'windows.sandbox="unelevated"'
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+
+
+def test_no_windows_sandbox_flag_elsewhere(tmp_path, monkeypatch):
+    monkeypatch.setattr("secfoo.agents.codex._IS_WINDOWS", False)
+    cmd = CodexAdapter().build_command("hello", workdir=tmp_path)
+    assert not any("windows.sandbox" in arg for arg in cmd)
+
+
 def test_sandbox_rejected_commands_is_failed_not_success(fake_popen, tmp_path):
     """Real stderr from a Windows E2E run (SECFOO-10): every read was
     refused, yet `codex exec` exited 0 with a "could not inspect" report."""
