@@ -112,6 +112,21 @@ class AgentAdapter(ABC):
         its "no findings" report would read as a clean bill of health).
         Default: trust the exit code."""
         return None
+    def extract_usage_from_stderr(self, stderr: str) -> Usage:
+        """Pull token counts / cost out of raw stderr. Default: unknown.
+
+        For CLIs that print usage alongside their progress output on stderr
+        rather than in stdout (e.g. Codex). Only consulted when
+        `extract_usage()` found nothing, so adapters that already read usage
+        from stdout are unaffected.
+        """
+        return Usage()
+
+    def _collect_usage(self, stdout: str, stderr: str) -> Usage:
+        usage = self.extract_usage(stdout)
+        if usage == Usage():
+            usage = self.extract_usage_from_stderr(stderr)
+        return usage
 
     def run(self, prompt: str, *, workdir: Path, timeout: int | None = None) -> AgentResult:
         if not self.is_available():
@@ -174,6 +189,7 @@ class AgentAdapter(ABC):
                 status = "failed"
                 stderr = f"secfoo: {reason}\n{stderr}"
             usage = self.extract_usage(stdout)
+            usage = self._collect_usage(stdout, stderr)
             return AgentResult(
                 agent=self.name,
                 exit_code=proc.returncode,

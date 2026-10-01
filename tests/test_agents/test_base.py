@@ -122,3 +122,24 @@ def test_kill_process_tree_swallows_taskkill_errors_on_windows(monkeypatch):
 
     monkeypatch.setattr("secfoo.agents.base.subprocess.run", _raise)
     _kill_process_tree(4321, posix=False)  # must not raise
+
+
+def test_run_falls_back_to_stderr_usage_when_stdout_has_none(fake_popen, tmp_path):
+    from secfoo.agents.codex import CodexAdapter
+
+    fake_popen(returncode=0, stdout="# Report", stderr="working...\ntokens used\n15,201\n")
+    result = CodexAdapter().run("hi", workdir=tmp_path)
+    assert result.status == "success"
+    assert result.input_tokens == 15201
+    assert result.output_tokens is None
+    assert result.cost_usd is None
+
+
+def test_run_prefers_stdout_usage_over_stderr(fake_popen, tmp_path, monkeypatch):
+    from secfoo.agents.base import Usage
+    from secfoo.agents.codex import CodexAdapter
+
+    monkeypatch.setattr(CodexAdapter, "extract_usage", lambda self, stdout: Usage(input_tokens=7, output_tokens=3))
+    fake_popen(returncode=0, stdout="# Report", stderr="tokens used\n15,201\n")
+    result = CodexAdapter().run("hi", workdir=tmp_path)
+    assert (result.input_tokens, result.output_tokens) == (7, 3)
