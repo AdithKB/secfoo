@@ -83,6 +83,13 @@ class AgentAdapter(ABC):
     name: ClassVar[str]
     binary: ClassVar[str]
     default_timeout_seconds: ClassVar[int] = 1800
+    # Send the prompt on stdin instead of argv. npm-installed CLIs are
+    # `.cmd`/`.bat` shims on Windows, so argv goes through cmd.exe, which
+    # truncates it at the first newline and caps the whole command line at
+    # ~8K chars -- a multi-line skill prompt silently loses everything past
+    # line one. Only enable this for CLIs whose non-interactive mode
+    # documents reading the prompt from stdin.
+    prompt_via_stdin: ClassVar[bool] = False
 
     def is_available(self) -> bool:
         return shutil.which(self.binary) is not None
@@ -99,6 +106,12 @@ class AgentAdapter(ABC):
         """Pull token counts / cost out of raw stdout. Default: unknown."""
         return Usage()
 
+    def detect_failure(self, stdout: str, stderr: str) -> str | None:
+        """Return a reason when a zero-exit run still didn't do the job (e.g.
+        every tool call was refused, so the agent never saw the target and
+        its "no findings" report would read as a clean bill of health).
+        Default: trust the exit code."""
+        return None
     def extract_usage_from_stderr(self, stderr: str) -> Usage:
         """Pull token counts / cost out of raw stderr. Default: unknown.
 
@@ -129,6 +142,10 @@ class AgentAdapter(ABC):
             )
 
         cmd = self.build_command(prompt, workdir=workdir)
+        # Popen, unlike shutil.which, ignores PATHEXT on Windows, so a bare
+        # "copilot"/"codex" never finds the npm `.cmd` shim and raises
+        # FileNotFoundError. Launch exactly what is_available() found.
+        cmd[0] = shutil.which(cmd[0]) or cmd[0]
         effective_timeout = timeout or self.default_timeout_seconds
         started = time.monotonic()
 
@@ -136,19 +153,42 @@ class AgentAdapter(ABC):
         # can kill the whole process tree via _kill_process_tree() -- see
         # its docstring for why subprocess.run's own timeout handling isn't
         # enough on its own.
-        proc = subprocess.Popen(
-            cmd,
-            cwd=workdir,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
         try:
-            stdout, stderr = proc.communicate(timeout=effective_timeout)
+            proc = subprocess.Popen(
+                cmd,
+                cwd=workdir,
+                # DEVNULL (or a pipe closed right after the prompt) means an
+                # interactive auth/trust prompt hits EOF instead of hanging.
+                stdin=subprocess.PIPE if self.prompt_via_stdin else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                # Agent CLIs emit UTF-8; the Windows locale default (cp1252)
+                # would raise UnicodeDecodeError on e.g. Copilot's stats line.
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return AgentResult(
+                agent=self.name,
+                exit_code=None,
+                stdout="",
+                stderr=f"failed to launch {cmd[0]!r}: {exc}",
+                duration_seconds=time.monotonic() - started,
+                timed_out=False,
+                status="failed",
+                raw_report="",
+            )
+        stdin_input = prompt if self.prompt_via_stdin else None
+        try:
+            stdout, stderr = proc.communicate(input=stdin_input, timeout=effective_timeout)
             duration = time.monotonic() - started
             status: Status = "success" if proc.returncode == 0 else "failed"
+            if status == "success" and (reason := self.detect_failure(stdout, stderr)):
+                status = "failed"
+                stderr = f"secfoo: {reason}\n{stderr}"
+            usage = self.extract_usage(stdout)
             usage = self._collect_usage(stdout, stderr)
             return AgentResult(
                 agent=self.name,

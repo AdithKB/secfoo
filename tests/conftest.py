@@ -15,8 +15,11 @@ class FakePopen:
         self._raise_timeout = raise_timeout
         self._raised = False
         self.pid = 999999
+        self.stdin_input = None
 
-    def communicate(self, timeout=None):
+    def communicate(self, input=None, timeout=None):
+        if input is not None:
+            self.stdin_input = input
         if self._raise_timeout and not self._raised:
             self._raised = True
             raise subprocess.TimeoutExpired(cmd=["fake"], timeout=timeout)

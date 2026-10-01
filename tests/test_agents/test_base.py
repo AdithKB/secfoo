@@ -52,6 +52,28 @@ def test_stdin_is_devnull_so_interactive_prompts_fail_fast_not_hang(fake_popen, 
     assert fake.call_kwargs["stdin"] == subprocess.DEVNULL
 
 
+def test_launches_the_path_which_resolved(fake_popen, tmp_path, monkeypatch):
+    """Popen ignores PATHEXT on Windows, so the bare binary name would miss
+    an npm `.cmd` shim that shutil.which (and is_available) found."""
+    _no_mcp_config(monkeypatch)
+    fake = fake_popen(returncode=0, stdout="ok", stderr="")
+    ClaudeAdapter().run("hi", workdir=tmp_path)
+    assert fake.call_args[0][0] == "/usr/bin/claude"
+
+
+def test_launch_error_is_failed_status_not_a_crash(tmp_path, monkeypatch):
+    _no_mcp_config(monkeypatch)
+    monkeypatch.setattr("secfoo.agents.base.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def _raise(*a, **kw):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr("secfoo.agents.base.subprocess.Popen", _raise)
+    result = ClaudeAdapter().run("hi", workdir=tmp_path)
+    assert result.status == "failed"
+    assert "failed to launch" in result.stderr
+
+
 def test_kill_process_tree_uses_killpg_on_posix(monkeypatch):
     # raising=False: os.getpgid/os.killpg/signal.SIGKILL don't exist as
     # attributes at all outside POSIX (that's the bug this whole file is

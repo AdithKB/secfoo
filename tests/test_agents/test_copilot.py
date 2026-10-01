@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import json
+import subprocess
+
 from secfoo.agents.copilot import CopilotAdapter
 
 
 def test_build_command(tmp_path):
     adapter = CopilotAdapter()
     cmd = adapter.build_command("hi", workdir=tmp_path)
-    assert cmd == ["copilot", "-p", "hi", "-s", "--allow-all-tools"]
+    assert cmd == ["copilot", "--output-format", "json", "--allow-all-tools"]
+
+
+def test_prompt_goes_to_stdin_not_argv(fake_popen, tmp_path):
+    """On Windows `copilot` is a .bat shim; cmd.exe truncates a `-p` argv
+    prompt at its first newline, so the prompt must be piped instead."""
+    fake = fake_popen(stdout="ok", returncode=0)
+    prompt = "line one\nline two"
+    CopilotAdapter().run(prompt, workdir=tmp_path)
+    assert fake.call_kwargs["stdin"] == subprocess.PIPE
+    assert fake.stdin_input == prompt
+    assert prompt not in fake.call_args[0]
 
 
 def test_build_command_never_grants_unrestricted_paths_or_urls(tmp_path):
@@ -26,12 +40,28 @@ def test_binary_and_name():
     assert CopilotAdapter.name == "copilot"
 
 
-def test_extract_report_defaults_to_raw_stdout():
-    """Unlike claude.py/gemini.py, `copilot -s` prints the answer directly
-    with no JSON envelope to unwrap -- confirmed against a real invocation.
-    """
+def test_extract_report_falls_back_to_raw_stdout_when_not_jsonl():
     adapter = CopilotAdapter()
     assert adapter.extract_report("# SAST Report\n...") == "# SAST Report\n..."
+
+
+def test_extract_report_takes_main_agent_answer_not_builtin_subagent():
+    """Event shapes captured from a real CLI 1.0.89 run (SECFOO-10): the
+    built-in "security-review" subagent's messages carry an agentId and
+    must not leak into (or interleave with) the report."""
+    events = [
+        {"type": "session.tools_updated", "data": {}},
+        {"type": "assistant.message", "data": {"content": ""}},
+        {"type": "subagent.started", "data": {"agentName": "security-review"}, "agentId": "sub-1"},
+        {"type": "assistant.message", "data": {"content": "## Security Findings\n### Alert 1", "phase": "final_answer"},
+         "agentId": "sub-1"},
+        {"type": "assistant.message_delta", "data": {"deltaContent": "# Secret"}},
+        {"type": "assistant.message", "data": {"content": "# Secret Scanning Report\n\n## 1. Executive Summary",
+                                               "phase": "final_answer"}},
+        {"type": "result", "exitCode": 0},
+    ]
+    stdout = "\n".join(json.dumps(e) for e in events)
+    assert CopilotAdapter().extract_report(stdout) == "# Secret Scanning Report\n\n## 1. Executive Summary"
 
 
 def test_is_available_uses_binary_name(monkeypatch):
