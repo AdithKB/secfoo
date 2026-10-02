@@ -98,6 +98,43 @@ def test_execute_runs_runs_skills_concurrently(tmp_path, monkeypatch):
     assert all(o.status == "success" for o in outcomes)
 
 
+def test_a_run_that_crashes_is_marked_failed_not_left_running(tmp_path, monkeypatch):
+    """SECFOO-39: the row is created as 'running' before the agent starts,
+    so an exception escaping the skill used to leave it 'running' forever
+    in `secfoo list` and the dashboard. It must end 'failed', with the
+    traceback kept, and the exception must still reach the caller."""
+    _patch_runner(monkeypatch, tmp_path)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+
+    class _CrashingAdapter(_SleepyAdapter):
+        def run(self, prompt, *, workdir, timeout=None):
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr("secfoo.runner.get_adapter", lambda agent_id: _CrashingAdapter())
+
+    repo = RunRepository(db_path=tmp_path / "db.sqlite")
+    try:
+        execute_runs(
+            skill_ids=["security-architecture-review"],
+            target=str(target_dir),
+            confluence_urls=[],
+            agent_id="claude",
+            repo=repo,
+        )
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("the crash must still propagate to the caller")
+    runs = repo.list_runs(limit=10)
+    repo.close()
+
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].finished_at is not None
+    assert "FileNotFoundError" in runs[0].stderr_excerpt
+
+
 def test_execute_runs_attaches_to_an_explicit_project_id_instead_of_the_targets_own(tmp_path, monkeypatch):
     """Third-Party Risk Assessment's auto-trigger scans a synthetic temp
     directory of extracted vendor-document text, but the run must attach
