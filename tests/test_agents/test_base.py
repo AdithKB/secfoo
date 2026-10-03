@@ -45,10 +45,12 @@ def test_stdin_is_devnull_so_interactive_prompts_fail_fast_not_hang(fake_popen, 
     prompt) from stdin must hit immediate EOF rather than blocking on the
     caller's real terminal, which they can't see (stdout/stderr are
     captured into pipes) and therefore can't ever answer."""
-    _no_mcp_config(monkeypatch)
+    # Cursor: an adapter that passes its prompt as argv. Adapters that pipe
+    # the prompt (claude, codex, copilot) get EOF once it has been written.
+    from secfoo.agents.cursor import CursorAdapter
+
     fake = fake_popen(returncode=0, stdout="ok", stderr="")
-    adapter = ClaudeAdapter()
-    adapter.run("hi", workdir=tmp_path)
+    CursorAdapter().run("hi", workdir=tmp_path)
     assert fake.call_kwargs["stdin"] == subprocess.DEVNULL
 
 

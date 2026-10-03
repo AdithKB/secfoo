@@ -26,6 +26,11 @@ class ClaudeAdapter(AgentAdapter):
     name = "claude"
     binary = "claude"
     default_timeout_seconds = 1800
+    # SECFOO-42: with no prompt argument, `claude -p` reads the prompt from
+    # stdin. Passing it as argv breaks an npm install on Windows, where
+    # `claude` is a `.cmd` shim and cmd.exe cuts the argument at its first
+    # newline (the same failure PR #23 fixed for Codex and Copilot).
+    prompt_via_stdin = True
 
     def build_command(self, prompt: str, *, workdir: Path) -> list[str]:
         # MCP servers from ~/.secfoo/config.toml are injected here, scoped
@@ -46,8 +51,8 @@ class ClaudeAdapter(AgentAdapter):
 
         cmd = [
             self.binary,
+            # No prompt here: it arrives on stdin (see prompt_via_stdin).
             "-p",
-            prompt,
             "--output-format",
             "json",
             "--allowedTools",

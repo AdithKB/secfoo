@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 from secfoo.agents.claude import ClaudeAdapter
 from secfoo.settings import MCPServerConfig
@@ -12,10 +13,24 @@ def test_build_command_argv(tmp_path, monkeypatch):
     cmd = adapter.build_command("hello", workdir=tmp_path)
     assert cmd[0] == "claude"
     assert "-p" in cmd
-    assert "hello" in cmd
     assert "--allowedTools" in cmd
     assert "--permission-mode" in cmd
     assert "default" in cmd
+
+
+def test_prompt_goes_to_stdin_not_argv(fake_popen, tmp_path, monkeypatch):
+    """SECFOO-42: an npm-installed `claude` is a .cmd shim on Windows, and
+    cmd.exe truncates an argv prompt at its first newline, so the prompt is
+    piped to `claude -p` instead."""
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    fake = fake_popen(returncode=0, stdout=json.dumps({"result": "ok"}))
+    prompt = "--looks-like-a-flag\nline two"
+    ClaudeAdapter().run(prompt, workdir=tmp_path)
+    argv = fake.call_args[0]
+    assert "-p" in argv
+    assert prompt not in argv
+    assert fake.call_kwargs["stdin"] == subprocess.PIPE
+    assert fake.stdin_input == prompt
 
 
 def test_build_command_no_mcp_config_flag_when_no_servers_configured(tmp_path, monkeypatch):
