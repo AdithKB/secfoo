@@ -44,6 +44,19 @@ class ClaudeAdapter(AgentAdapter):
             allowed_tools,
             "--permission-mode",
             "default",
+            # SECFOO-40: the target is untrusted, and `-p` skips Claude
+            # Code's workspace-trust prompt. Without these two flags the
+            # target's own `.claude/settings.json` is loaded: its hooks run
+            # as shell commands, and `enableAllProjectMcpServers` starts
+            # whatever its `.mcp.json` names -- both reproduced on Claude
+            # Code 2.1.288. `--setting-sources user` drops the project and
+            # local settings (the user's own still apply);
+            # `--strict-mcp-config` drops every MCP server except the ones
+            # secfoo passes via `--mcp-config` below, which also covers a
+            # user whose own settings auto-approve project servers.
+            "--setting-sources",
+            "user",
+            "--strict-mcp-config",
         ]
         if mcp_config_path:
             cmd += ["--mcp-config", str(mcp_config_path)]

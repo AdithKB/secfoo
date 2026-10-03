@@ -40,6 +40,36 @@ def test_build_command_adds_mcp_config_and_server_level_tool_grant(tmp_path, mon
     assert "mcp__Atlassian-Rovo-MCP" in cmd[allowed_tools_idx]
 
 
+def test_build_command_ignores_the_targets_own_claude_settings(tmp_path, monkeypatch):
+    """SECFOO-40: the target is untrusted and `-p` skips the trust prompt,
+    so its `.claude/settings.json` (hooks, permissions.allow) must not be
+    loaded. Only the user's own settings may apply."""
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    cmd = ClaudeAdapter().build_command("hello", workdir=tmp_path)
+    assert cmd[cmd.index("--setting-sources") + 1] == "user"
+
+
+def test_build_command_only_loads_mcp_servers_secfoo_passes(tmp_path, monkeypatch):
+    """SECFOO-40: a `.mcp.json` in the target must never be started, with or
+    without secfoo-configured servers."""
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    assert "--strict-mcp-config" in ClaudeAdapter().build_command("hello", workdir=tmp_path)
+
+    server = MCPServerConfig(name="Atlassian-Rovo-MCP", command="npx", args=["-y", "mcp-remote@latest"])
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _config_with([server]))
+    monkeypatch.setattr("secfoo.agents.claude.write_claude_mcp_config", lambda servers: tmp_path / "mcp.json")
+    cmd = ClaudeAdapter().build_command("hello", workdir=tmp_path)
+    assert "--strict-mcp-config" in cmd
+    assert "--mcp-config" in cmd
+
+
+def test_build_command_never_bypasses_permissions(tmp_path, monkeypatch):
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    cmd = ClaudeAdapter().build_command("hello", workdir=tmp_path)
+    assert "--dangerously-skip-permissions" not in cmd
+    assert "bypassPermissions" not in cmd
+
+
 def _empty_config():
     from secfoo.settings import Defaults, SecfooConfig
 
