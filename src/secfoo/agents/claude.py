@@ -1,3 +1,29 @@
+"""Claude Code CLI adapter.
+
+Flags verified against a real `claude --help` and real runs (Claude Code
+2.1.288, Oct 2026, Linux). Not checked on older versions, macOS or Windows;
+an older CLI that lacks one of these flags fails fast with an "unknown
+option" error on stderr rather than running with a weaker setup.
+
+`claude -p` runs one non-interactive turn; with no prompt argument it reads
+the prompt from stdin. `--output-format json` prints a single result object
+on stdout: `result` (the report), `usage`, `total_cost_usd`, `is_error`,
+`subtype`, `permission_denials`. On an error result the CLI exits 1 with an
+empty stderr, so the reason has to be read from that object.
+
+Read-only by tool grant, not by sandbox: only `ALLOWED_TOOLS` are
+pre-approved, and in `-p` mode nothing can answer a permission prompt, so
+any other tool call is denied (a `Write` attempt comes back in
+`permission_denials` and no file is created).
+
+Deliberately NOT passed:
+- `--dangerously-skip-permissions` / `--permission-mode bypassPermissions`:
+  a read-only review never needs them.
+- `--bare`: it skips hooks too, but per `--help` it only authenticates with
+  `ANTHROPIC_API_KEY` or an `apiKeyHelper`, which would lock out
+  subscription logins.
+"""
+
 from __future__ import annotations
 
 import json
@@ -57,6 +83,14 @@ class ClaudeAdapter(AgentAdapter):
             "json",
             "--allowedTools",
             allowed_tools,
+            # SECFOO-43: `default` is no longer listed in `claude --help`
+            # (2.1.288 lists acceptEdits, auto, bypassPermissions, manual,
+            # dontAsk, plan) but is still accepted, and with it a tool
+            # outside the grant above is denied. Kept as is because it is
+            # the value every released version of this adapter has passed;
+            # the listed names were not tried on older CLIs. Kept explicit,
+            # rather than dropped, so the mode does not depend on a
+            # `defaultMode` in the user's own settings.
             "--permission-mode",
             "default",
             # SECFOO-40: the target is untrusted, and `-p` skips Claude
@@ -72,6 +106,9 @@ class ClaudeAdapter(AgentAdapter):
             "--setting-sources",
             "user",
             "--strict-mcp-config",
+            # SECFOO-43: don't leave a transcript in ~/.claude/projects for
+            # every assessment (the Codex adapter's `--ephemeral`).
+            "--no-session-persistence",
         ]
         if mcp_config_path:
             cmd += ["--mcp-config", str(mcp_config_path)]

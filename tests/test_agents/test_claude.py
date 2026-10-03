@@ -78,6 +78,21 @@ def test_build_command_only_loads_mcp_servers_secfoo_passes(tmp_path, monkeypatc
     assert "--mcp-config" in cmd
 
 
+def test_build_command_does_not_leave_a_session_file_per_scan(tmp_path, monkeypatch):
+    """SECFOO-43: without this every assessment writes a transcript under
+    ~/.claude/projects/<target path>/."""
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    assert "--no-session-persistence" in ClaudeAdapter().build_command("hello", workdir=tmp_path)
+
+
+def test_build_command_pins_the_permission_mode(tmp_path, monkeypatch):
+    """SECFOO-43: passed explicitly so a `defaultMode` in the user's own
+    settings can't loosen a scan."""
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    cmd = ClaudeAdapter().build_command("hello", workdir=tmp_path)
+    assert cmd[cmd.index("--permission-mode") + 1] == "default"
+
+
 def test_build_command_never_bypasses_permissions(tmp_path, monkeypatch):
     monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
     cmd = ClaudeAdapter().build_command("hello", workdir=tmp_path)
