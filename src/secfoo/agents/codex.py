@@ -35,6 +35,9 @@ from secfoo.agents.base import AgentAdapter, Usage
 # "tokens used" on its own line, then the total (thousands separators allowed).
 _TOKENS_USED_RE = re.compile(r"^\s*tokens used\s*\n\s*([\d,]+)\s*$", re.MULTILINE | re.IGNORECASE)
 
+# Module-level so tests can flip it; patching os.name itself breaks pytest.
+_IS_WINDOWS = os.name == "nt"
+
 
 class CodexAdapter(AgentAdapter):
     name = "codex"
@@ -46,25 +49,29 @@ class CodexAdapter(AgentAdapter):
     prompt_via_stdin = True
 
     def detect_failure(self, stdout: str, stderr: str) -> str | None:
-        # On Windows without Codex's (admin-installed) sandbox, `--sandbox
-        # read-only` refuses *every* shell command, reads included, and
-        # `codex exec` still exits 0 with a "could not inspect" report
-        # (SECFOO-10 E2E, codex-cli 0.159.2). Never record that as success.
+        # If Codex's sandbox still refuses its commands, `codex exec` exits 0
+        # with a "could not inspect" report (SECFOO-10 E2E, codex-cli
+        # 0.159.2). Never record that as success.
         if "exec_command failed" not in stderr:
             return None
-        hint = ""
-        if os.name == "nt":
-            hint = (" On Windows, Codex's read-only sandbox needs a one-time admin setup"
-                    " (set windows.sandbox = \"elevated\" in ~/.codex/config.toml and approve the prompt).")
-        return "Codex's sandbox rejected its commands, so the target was never read." + hint
+        return "Codex's sandbox rejected its commands, so the target was never read."
 
     def build_command(self, prompt: str, *, workdir: Path) -> list[str]:
+        windows_sandbox: list[str] = []
+        if _IS_WINDOWS:
+            # With no Windows sandbox configured, `--sandbox read-only`
+            # rejects every command, reads included ("blocked by policy").
+            # The unelevated (restricted-token) sandbox needs no admin setup
+            # and was verified to allow reads and deny writes both inside
+            # and outside the workdir (SECFOO-38, codex-cli 0.159.2).
+            windows_sandbox = ["-c", 'windows.sandbox="unelevated"']
         return [
             self.binary,
             "exec",
             # Read-only filesystem: the assessment only reads the target.
             "--sandbox",
             "read-only",
+            *windows_sandbox,
             # secfoo runs against arbitrary targets (cloned repos, user
             # paths, non-git dirs); without this Codex refuses to start
             # outside a trusted git repository.
