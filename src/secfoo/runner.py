@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+import traceback
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -191,6 +193,24 @@ def update_sast_findings(
     )
 
 
+def _mark_run_crashed(repo: RunRepository, run_uuid: str, *, duration_seconds: float) -> None:
+    """Close out a run whose skill raised before complete_run(): status
+    'failed', with the traceback kept as the stderr excerpt. Never raises,
+    so it can't mask the original exception."""
+    try:
+        repo.complete_run(
+            run_uuid,
+            status="failed",
+            exit_code=None,
+            duration_seconds=duration_seconds,
+            report_path=None,
+            prompt_path=None,
+            stderr_excerpt=f"secfoo crashed during this run:\n{traceback.format_exc()}"[-STDERR_EXCERPT_LIMIT:],
+        )
+    except Exception:
+        logger.exception("Failed to mark crashed run %s as failed", run_uuid)
+
+
 @contextmanager
 def _target_workdir(resolved: ResolvedTarget) -> Iterator[Path]:
     if resolved.kind is TargetKind.GITHUB:
@@ -231,48 +251,59 @@ def _run_single_skill(
             confluence_urls=confluence_urls,
             assessment_id=assessment_id,
         )
+        started = time.monotonic()
 
-        report_dir = run_dir(run_uuid)
-        report_dir.mkdir(parents=True, exist_ok=True)
-        prompt_path = report_dir / "prompt.md"
-        prompt_path.write_text(prompt, encoding="utf-8")
+        # The row now says 'running' and only complete_run() moves it on, so
+        # anything raised before that point (adapter crash, disk error, a
+        # report parser) must still close the row out -- otherwise it reads
+        # as "running" in `secfoo list` and the dashboard forever.
+        try:
+            report_dir = run_dir(run_uuid)
+            report_dir.mkdir(parents=True, exist_ok=True)
+            prompt_path = report_dir / "prompt.md"
+            prompt_path.write_text(prompt, encoding="utf-8")
 
-        if on_skill_start:
-            on_skill_start(skill.name)
+            if on_skill_start:
+                on_skill_start(skill.name)
 
-        adapter = get_adapter(agent_id)
-        result = adapter.run(prompt, workdir=target_ctx.local_path, timeout=timeout)
-        # Memory Bank: capture HEAD SHA so future runs can diff against this baseline.
-        target_commit = _git_head_commit(target_ctx.local_path)
+            adapter = get_adapter(agent_id)
+            result = adapter.run(prompt, workdir=target_ctx.local_path, timeout=timeout)
+            # Memory Bank: capture HEAD SHA so future runs can diff against this baseline.
+            target_commit = _git_head_commit(target_ctx.local_path)
 
-        if on_skill_complete:
-            on_skill_complete(skill.name, result.status)
+            if on_skill_complete:
+                on_skill_complete(skill.name, result.status)
 
-        (report_dir / "stdout.log").write_text(result.stdout, encoding="utf-8")
-        (report_dir / "stderr.log").write_text(result.stderr, encoding="utf-8")
-        report_path = report_dir / "report.md"
-        report_text = strip_preamble(result.raw_report)
-        report_path.write_text(report_text, encoding="utf-8")
-        severity = count_severities(report_text)
+            (report_dir / "stdout.log").write_text(result.stdout, encoding="utf-8")
+            (report_dir / "stderr.log").write_text(result.stderr, encoding="utf-8")
+            report_path = report_dir / "report.md"
+            report_text = strip_preamble(result.raw_report)
+            report_path.write_text(report_text, encoding="utf-8")
+            severity = count_severities(report_text)
 
-        repo.complete_run(
-            run_uuid,
-            status=result.status,
-            exit_code=result.exit_code,
-            duration_seconds=result.duration_seconds,
-            report_path=str(report_path),
-            prompt_path=str(prompt_path),
-            stderr_excerpt=(result.stderr or "")[:STDERR_EXCERPT_LIMIT] or None,
-            critical_count=severity.critical,
-            high_count=severity.high,
-            medium_count=severity.medium,
-            low_count=severity.low,
-            info_count=severity.info,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cost_usd=result.cost_usd,
-            target_commit=target_commit,  # Memory Bank: persisted for incremental diff rescans.
-        )
+            repo.complete_run(
+                run_uuid,
+                status=result.status,
+                exit_code=result.exit_code,
+                duration_seconds=result.duration_seconds,
+                report_path=str(report_path),
+                prompt_path=str(prompt_path),
+                stderr_excerpt=(result.stderr or "")[:STDERR_EXCERPT_LIMIT] or None,
+                critical_count=severity.critical,
+                high_count=severity.high,
+                medium_count=severity.medium,
+                low_count=severity.low,
+                info_count=severity.info,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost_usd=result.cost_usd,
+                target_commit=target_commit,  # Memory Bank: persisted for incremental diff rescans.
+            )
+        except BaseException:
+            # BaseException so Ctrl+C mid-run is recorded too; re-raised
+            # either way, so callers see exactly what they did before.
+            _mark_run_crashed(repo, run_uuid, duration_seconds=time.monotonic() - started)
+            raise
 
         if result.status == "success":
             _try_cloud_sync(repo, run_uuid)
