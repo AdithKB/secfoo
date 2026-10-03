@@ -133,3 +133,63 @@ def test_run_records_usage_from_json_output(tmp_path, monkeypatch, fake_popen):
     assert result.cost_usd == 1.5
     assert result.input_tokens == 10
     assert result.output_tokens == 5
+
+
+# Captured from a real `claude -p ... --max-budget-usd 0.0001` run (Claude
+# Code 2.1.288): exit code 1, empty stderr, and no "result" key.
+_ERROR_RESULT = json.dumps({
+    "type": "result",
+    "subtype": "error_max_budget_usd",
+    "is_error": True,
+    "num_turns": 1,
+    "errors": ["Reached maximum budget ($0.0001)"],
+    "total_cost_usd": 0.000965,
+    "usage": {"input_tokens": 0, "output_tokens": 0},
+})
+
+
+def test_describe_failure_reads_subtype_and_errors_from_stdout_json():
+    reason = ClaudeAdapter().describe_failure(_ERROR_RESULT, "")
+    assert reason == "Claude Code reported error_max_budget_usd: Reached maximum budget ($0.0001)"
+
+
+def test_describe_failure_falls_back_to_result_text():
+    stdout = json.dumps({"is_error": True, "subtype": "success", "result": "Invalid API key"})
+    assert ClaudeAdapter().describe_failure(stdout, "") == "Claude Code reported success: Invalid API key"
+
+
+def test_describe_failure_is_none_without_an_error_result():
+    adapter = ClaudeAdapter()
+    assert adapter.describe_failure(json.dumps({"is_error": False, "result": "report"}), "") is None
+    assert adapter.describe_failure("not json", "") is None
+    assert adapter.describe_failure("[]", "") is None
+
+
+def test_run_failed_records_the_reason_claude_put_in_stdout(fake_popen, tmp_path, monkeypatch):
+    """SECFOO-41: stderr is empty on a Claude error result, so without this
+    the run was saved as failed with no explanation."""
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    fake_popen(returncode=1, stdout=_ERROR_RESULT, stderr="")
+    result = ClaudeAdapter().run("review this", workdir=tmp_path)
+    assert result.status == "failed"
+    assert result.raw_report == ""
+    assert result.stderr.startswith("secfoo: Claude Code reported error_max_budget_usd")
+    assert "Reached maximum budget" in result.stderr
+    # What the failed run did spend is still recorded.
+    assert result.cost_usd == 0.000965
+
+
+def test_run_failed_keeps_stderr_when_stdout_has_no_error_result(fake_popen, tmp_path, monkeypatch):
+    monkeypatch.setattr("secfoo.agents.claude.load_config", lambda: _empty_config())
+    fake_popen(returncode=1, stdout="", stderr="error: unknown option '--nope'")
+    result = ClaudeAdapter().run("review this", workdir=tmp_path)
+    assert result.status == "failed"
+    assert result.stderr == "error: unknown option '--nope'"
+
+
+def test_extract_report_falls_back_to_raw_stdout_when_result_is_not_text():
+    adapter = ClaudeAdapter()
+    assert adapter.extract_report("[]") == "[]"
+    assert adapter.extract_report(_ERROR_RESULT) == _ERROR_RESULT
+    null_result = json.dumps({"result": None})
+    assert adapter.extract_report(null_result) == null_result
